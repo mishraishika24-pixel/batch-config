@@ -1,0 +1,66 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: batch
+      POSTGRES_PASSWORD: batch
+      POSTGRES_DB: batch
+    ports:
+      - "5432:5432"
+    volumes:
+      - batch_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U batch -d batch"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql+psycopg2://batch:batch@db:5432/batch
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://batch:batch@db:5432/batch
+      LOG_LEVEL: INFO
+      APP_ENV: local
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build: .
+    command: python -m app.worker
+    environment:
+      DATABASE_URL: postgresql+psycopg2://batch:batch@db:5432/batch
+      LOG_LEVEL: INFO
+      APP_ENV: local
+      WORKER_POLL_INTERVAL_SECONDS: "1.0"
+      WORKER_CLAIM_BATCH_SIZE: "10"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Horizontal scaling: `docker compose up --scale worker=3` runs three
+    # of these safely -- they share the queue via SKIP LOCKED and never
+    # double-process an item.
+
+volumes:
+  batch_pg_data:
